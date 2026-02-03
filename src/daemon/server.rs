@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
@@ -25,8 +26,22 @@ impl Server {
         // Remove existing socket if present
         let _ = std::fs::remove_file(&self.config.socket_path);
 
-        let listener = UnixListener::bind(&self.config.socket_path)
+        // Set restrictive umask before binding to avoid permission race window
+        let old_umask = unsafe { libc::umask(0o177) };
+        let bind_result = UnixListener::bind(&self.config.socket_path);
+        unsafe { libc::umask(old_umask) }; // Restore umask
+
+        let listener = bind_result
             .map_err(|e| Error::Internal(format!("failed to bind socket: {}", e)))?;
+
+        // Verify permissions (belt and suspenders)
+        if let Err(e) = std::fs::set_permissions(
+            &self.config.socket_path,
+            std::fs::Permissions::from_mode(0o600),
+        ) {
+            let _ = std::fs::remove_file(&self.config.socket_path);
+            return Err(Error::Internal(format!("failed to set socket permissions: {}", e)));
+        }
 
         info!("daemon listening on {:?}", self.config.socket_path);
 
