@@ -1,0 +1,28 @@
+[package]
+name = "op-cache"
+version = "0.1.0"
+edition = "2021"
+description = "A fast caching proxy for 1Password CLI op read commands"
+license = "MIT"
+
+[dependencies]
+# Single-threaded runtime (rt, not rt-multi-thread) for fast CLI startup
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "macros", "process", "signal", "time"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+serde_yaml = "0.9"
+moka = { version = "0.12", features = ["future"] }
+thiserror = "2"
+anyhow = "1"
+fork = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+directories = "5"
+libc = "0.2"
+blake3 = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
