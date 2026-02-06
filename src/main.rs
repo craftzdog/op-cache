@@ -4,6 +4,7 @@ mod config;
 mod daemon;
 mod error;
 mod protocol;
+mod run;
 mod spawn;
 
 use anyhow::Result;
@@ -19,6 +20,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Read { reference } => cmd_read(config, &reference),
+        Command::Run { command } => cmd_run(config, command),
         Command::Status => cmd_status(&config),
         Command::Stats => cmd_stats(config),
         Command::Clear => cmd_clear(config),
@@ -39,6 +41,30 @@ fn cmd_read(config: Config, reference: &str) -> Result<()> {
         print!("{}", value);
         Ok(())
     })
+}
+
+fn cmd_run(config: Config, command: Vec<String>) -> Result<()> {
+    let mut env: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
+    let refs = run::collect_op_refs(&env);
+
+    if refs.is_empty() {
+        // No op:// references — just exec directly
+        return run::exec_command(&command[0], &command[1..], &env);
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    let resolved = rt.block_on(async {
+        let client = Client::new(config);
+        run::resolve_refs(&client, &refs).await
+    })?;
+
+    env = run::build_env(&env, &resolved);
+    run::exec_command(&command[0], &command[1..], &env)
 }
 
 fn cmd_status(config: &Config) -> Result<()> {

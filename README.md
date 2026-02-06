@@ -40,6 +40,21 @@ op-cache clear
 op-cache stop
 ```
 
+### Running Commands with Secrets
+
+`op-cache run` scans your environment for variables with `op://` values, resolves them all concurrently through the cache, then replaces the current process with your command (via `exec`). If any resolution fails, the command is aborted.
+
+```bash
+# Run a command with secrets in env vars
+export DATABASE_URL="op://Private/DB/url"
+export API_KEY="op://Private/API/token"
+op-cache run -- ./my-app
+
+# Works with any command
+op-cache run -- env | grep SECRET
+op-cache run -- docker compose up
+```
+
 ### Example
 
 ```bash

@@ -29,6 +29,14 @@ pub enum Command {
     /// Stop the daemon
     Stop,
 
+    /// Run a command with op:// env vars resolved through the cache
+    #[command(trailing_var_arg = true)]
+    Run {
+        /// Command and arguments to execute
+        #[arg(required = true, num_args = 1..)]
+        command: Vec<String>,
+    },
+
     /// Run the daemon in background
     #[command(hide = true)]
     Daemon,

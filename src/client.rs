@@ -1,6 +1,7 @@
-use std::process::Command;
+use std::time::Duration;
 
 use tokio::net::UnixStream;
+use tokio::process::Command;
 
 use crate::config::Config;
 use crate::error::Error;
@@ -57,7 +58,7 @@ impl Client {
             Response::Hit { value } => Ok(value),
             Response::Miss => {
                 // Cache miss - execute op read ourselves
-                let value = self.execute_op_read(reference)?;
+                let value = self.execute_op_read(reference).await?;
 
                 // Store in cache
                 let _ = self
@@ -74,12 +75,23 @@ impl Client {
     }
 
     /// Execute op read command
-    fn execute_op_read(&self, reference: &str) -> Result<String, Error> {
-        let output = Command::new(&self.config.op_path)
-            .arg("read")
-            .arg(reference)
-            .output()
-            .map_err(|e| Error::OpFailed(format!("failed to execute op: {}", e)))?;
+    async fn execute_op_read(&self, reference: &str) -> Result<String, Error> {
+        let timeout = Duration::from_secs(self.config.op_timeout_seconds);
+        let output = tokio::time::timeout(
+            timeout,
+            Command::new(&self.config.op_path)
+                .arg("read")
+                .arg(reference)
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            Error::OpFailed(format!(
+                "op read timed out after {}s for {}",
+                self.config.op_timeout_seconds, reference
+            ))
+        })?
+        .map_err(|e| Error::OpFailed(format!("failed to execute op: {}", e)))?;
 
         if output.status.success() {
             let value = String::from_utf8_lossy(&output.stdout)
