@@ -15,6 +15,10 @@ pub enum Command {
     Read {
         /// Secret reference (e.g., op://vault/item/field)
         reference: String,
+
+        /// 1Password account to use (e.g., my.1password.com)
+        #[arg(long)]
+        account: Option<String>,
     },
 
     /// Check if the daemon is running
@@ -32,6 +36,10 @@ pub enum Command {
     /// Run a command with op:// env vars resolved through the cache
     #[command(trailing_var_arg = true)]
     Run {
+        /// 1Password account to use (e.g., my.1password.com)
+        #[arg(long)]
+        account: Option<String>,
+
         /// Command and arguments to execute
         #[arg(required = true, num_args = 1..)]
         command: Vec<String>,

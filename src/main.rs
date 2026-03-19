@@ -19,8 +19,8 @@ fn main() -> Result<()> {
     let config = Config::load()?;
 
     match cli.command {
-        Command::Read { reference } => cmd_read(config, &reference),
-        Command::Run { command } => cmd_run(config, command),
+        Command::Read { reference, account } => cmd_read(config, &reference, account.as_deref()),
+        Command::Run { account, command } => cmd_run(config, command, account.as_deref()),
         Command::Status => cmd_status(&config),
         Command::Stats => cmd_stats(config),
         Command::Clear => cmd_clear(config),
@@ -30,20 +30,20 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_read(config: Config, reference: &str) -> Result<()> {
+fn cmd_read(config: Config, reference: &str, account: Option<&str>) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
 
     rt.block_on(async {
         let client = Client::new(config);
-        let value = client.read(reference).await?;
+        let value = client.read(reference, account).await?;
         print!("{}", value);
         Ok(())
     })
 }
 
-fn cmd_run(config: Config, command: Vec<String>) -> Result<()> {
+fn cmd_run(config: Config, command: Vec<String>, account: Option<&str>) -> Result<()> {
     let mut env: Vec<(String, String)> = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
         .collect();
@@ -60,7 +60,7 @@ fn cmd_run(config: Config, command: Vec<String>) -> Result<()> {
 
     let resolved = rt.block_on(async {
         let client = Client::new(config);
-        run::resolve_refs(&client, &refs).await
+        run::resolve_refs(&client, &refs, account).await
     })?;
 
     env = run::build_env(&env, &resolved);

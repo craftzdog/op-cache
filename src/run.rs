@@ -29,10 +29,11 @@ pub fn collect_op_refs(env: &[(String, String)]) -> Vec<&str> {
 pub async fn resolve_refs(
     client: &Client,
     refs: &[&str],
+    account: Option<&str>,
 ) -> Result<HashMap<String, String>> {
     let results: Vec<_> = stream::iter(refs.iter().copied())
         .map(|reference| async move {
-            let result = client.read(reference).await;
+            let result = client.read(reference, account).await;
             (reference, result)
         })
         .buffer_unordered(MAX_CONCURRENT_READS)

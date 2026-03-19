@@ -30,14 +30,26 @@ impl Client {
         Ok(response)
     }
 
-    /// Hash the reference for use as cache key
-    fn cache_key(reference: &str) -> String {
-        let hash = blake3::hash(reference.as_bytes());
+    /// Resolve the effective account: explicit flag wins, then OP_ACCOUNT env var.
+    fn effective_account(explicit: Option<&str>) -> Option<String> {
+        if let Some(acct) = explicit {
+            return Some(acct.to_string());
+        }
+        std::env::var("OP_ACCOUNT").ok().filter(|v| !v.is_empty())
+    }
+
+    /// Hash the reference (and optional account) for use as cache key
+    fn cache_key(reference: &str, account: Option<&str>) -> String {
+        let input = match account {
+            Some(acct) => format!("{}\0{}", acct, reference),
+            None => reference.to_string(),
+        };
+        let hash = blake3::hash(input.as_bytes());
         hash.to_hex().to_string()
     }
 
     /// Read a secret, using cache if available
-    pub async fn read(&self, reference: &str) -> Result<String, Error> {
+    pub async fn read(&self, reference: &str, account: Option<&str>) -> Result<String, Error> {
         // Validate reference format
         if !reference.starts_with("op://") {
             return Err(Error::InvalidReference(format!(
@@ -49,7 +61,8 @@ impl Client {
         // Ensure daemon is running
         ensure_daemon_running(&self.config)?;
 
-        let key = Self::cache_key(reference);
+        let effective = Self::effective_account(account);
+        let key = Self::cache_key(reference, effective.as_deref());
 
         // Check cache first
         let response = self.send_request(Request::Get { key: key.clone() }).await?;
@@ -58,7 +71,7 @@ impl Client {
             Response::Hit { value } => Ok(value),
             Response::Miss => {
                 // Cache miss - execute op read ourselves
-                let value = self.execute_op_read(reference).await?;
+                let value = self.execute_op_read(reference, effective.as_deref()).await?;
 
                 // Store in cache
                 let _ = self
@@ -75,15 +88,18 @@ impl Client {
     }
 
     /// Execute op read command
-    async fn execute_op_read(&self, reference: &str) -> Result<String, Error> {
+    async fn execute_op_read(
+        &self,
+        reference: &str,
+        account: Option<&str>,
+    ) -> Result<String, Error> {
         let timeout = Duration::from_secs(self.config.op_timeout_seconds);
-        let output = tokio::time::timeout(
-            timeout,
-            Command::new(&self.config.op_path)
-                .arg("read")
-                .arg(reference)
-                .output(),
-        )
+        let mut cmd = Command::new(&self.config.op_path);
+        cmd.arg("read").arg(reference);
+        if let Some(acct) = account {
+            cmd.arg("--account").arg(acct);
+        }
+        let output = tokio::time::timeout(timeout, cmd.output())
         .await
         .map_err(|_| {
             Error::OpFailed(format!(
@@ -133,5 +149,71 @@ impl Client {
             Response::ShuttingDown => Ok(()),
             _ => Err(Error::Protocol("unexpected response".to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_without_account() {
+        let key = Client::cache_key("op://vault/item/field", None);
+        let expected = blake3::hash(b"op://vault/item/field").to_hex().to_string();
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn cache_key_with_account() {
+        let key = Client::cache_key("op://vault/item/field", Some("my.1password.com"));
+        let expected = blake3::hash(b"my.1password.com\0op://vault/item/field")
+            .to_hex()
+            .to_string();
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn cache_key_different_accounts_differ() {
+        let key_a = Client::cache_key("op://vault/item/field", Some("a.1password.com"));
+        let key_b = Client::cache_key("op://vault/item/field", Some("b.1password.com"));
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn cache_key_account_vs_none_differ() {
+        let with = Client::cache_key("op://vault/item/field", Some("my.1password.com"));
+        let without = Client::cache_key("op://vault/item/field", None);
+        assert_ne!(with, without);
+    }
+
+    #[test]
+    fn effective_account_explicit_wins() {
+        std::env::set_var("OP_ACCOUNT", "env.1password.com");
+        let result = Client::effective_account(Some("explicit.1password.com"));
+        std::env::remove_var("OP_ACCOUNT");
+        assert_eq!(result.as_deref(), Some("explicit.1password.com"));
+    }
+
+    #[test]
+    fn effective_account_falls_back_to_env() {
+        std::env::set_var("OP_ACCOUNT", "env.1password.com");
+        let result = Client::effective_account(None);
+        std::env::remove_var("OP_ACCOUNT");
+        assert_eq!(result.as_deref(), Some("env.1password.com"));
+    }
+
+    #[test]
+    fn effective_account_none_when_unset() {
+        std::env::remove_var("OP_ACCOUNT");
+        let result = Client::effective_account(None);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn effective_account_ignores_empty_env() {
+        std::env::set_var("OP_ACCOUNT", "");
+        let result = Client::effective_account(None);
+        std::env::remove_var("OP_ACCOUNT");
+        assert_eq!(result, None);
     }
 }
