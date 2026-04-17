@@ -81,6 +81,41 @@ pub fn build_env(
         .collect()
 }
 
+/// Merge process environment with env file entries.
+/// Env file entries override existing vars; new vars are appended.
+pub fn merge_env(
+    process_env: Vec<(String, String)>,
+    file_env: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let file_map: HashMap<&str, &str> = file_env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    let mut seen_keys: HashSet<String> = HashSet::new();
+    let mut result: Vec<(String, String)> = process_env
+        .into_iter()
+        .map(|(k, v)| {
+            seen_keys.insert(k.clone());
+            if let Some(&file_val) = file_map.get(k.as_str()) {
+                (k, file_val.to_string())
+            } else {
+                (k, v)
+            }
+        })
+        .collect();
+
+    // Append new vars from env file that weren't in process env
+    for (k, v) in file_env {
+        if !seen_keys.contains(&k) {
+            seen_keys.insert(k.clone());
+            result.push((k, v));
+        }
+    }
+
+    result
+}
+
 /// Replace the current process with the given command and environment.
 /// This function does not return on success.
 pub fn exec_command(program: &str, args: &[String], env: &[(String, String)]) -> Result<()> {
@@ -200,5 +235,87 @@ mod tests {
         let resolved = HashMap::new();
         let result = build_env(&env, &resolved);
         assert_eq!(result[0], ("X".into(), "op://vault/x".into()));
+    }
+
+    // --- merge_env tests ---
+
+    #[test]
+    fn merge_env_file_overrides_process_env() {
+        let process_env = vec![("KEY".into(), "old".into())];
+        let file_env = vec![("KEY".into(), "new".into())];
+        let result = merge_env(process_env, file_env);
+        assert_eq!(result, vec![("KEY".into(), "new".into())]);
+    }
+
+    #[test]
+    fn merge_env_file_adds_new_vars() {
+        let process_env = vec![("EXISTING".into(), "val".into())];
+        let file_env = vec![("NEW_KEY".into(), "new_val".into())];
+        let result = merge_env(process_env, file_env);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], ("EXISTING".into(), "val".into()));
+        assert_eq!(result[1], ("NEW_KEY".into(), "new_val".into()));
+    }
+
+    #[test]
+    fn merge_preserves_non_overridden_vars() {
+        let process_env = vec![
+            ("A".into(), "1".into()),
+            ("B".into(), "2".into()),
+            ("C".into(), "3".into()),
+        ];
+        let file_env = vec![("B".into(), "override".into())];
+        let result = merge_env(process_env, file_env);
+        assert_eq!(result[0], ("A".into(), "1".into()));
+        assert_eq!(result[1], ("B".into(), "override".into()));
+        assert_eq!(result[2], ("C".into(), "3".into()));
+    }
+
+    #[test]
+    fn merge_preserves_order() {
+        let process_env = vec![
+            ("A".into(), "1".into()),
+            ("B".into(), "2".into()),
+            ("C".into(), "3".into()),
+        ];
+        let file_env = vec![
+            ("B".into(), "new_b".into()),
+            ("D".into(), "4".into()),
+        ];
+        let result = merge_env(process_env, file_env);
+        let keys: Vec<&str> = result.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["A", "B", "C", "D"]);
+    }
+
+    #[test]
+    fn collect_op_refs_from_merged_env() {
+        let process_env = vec![("PLAIN".into(), "hello".into())];
+        let file_env = vec![
+            ("SECRET".into(), "op://vault/item/field".into()),
+        ];
+        let merged = merge_env(process_env, file_env);
+        let refs = collect_op_refs(&merged);
+        assert_eq!(refs, vec!["op://vault/item/field"]);
+    }
+
+    #[test]
+    fn build_env_with_merged_file_refs() {
+        let process_env = vec![("PLAIN".into(), "hello".into())];
+        let file_env = vec![
+            ("SECRET".into(), "op://vault/item/field".into()),
+            ("DEBUG".into(), "true".into()),
+        ];
+        let merged = merge_env(process_env, file_env);
+
+        let refs = collect_op_refs(&merged);
+        assert_eq!(refs, vec!["op://vault/item/field"]);
+
+        let mut resolved = HashMap::new();
+        resolved.insert("op://vault/item/field".into(), "s3cret".into());
+
+        let result = build_env(&merged, &resolved);
+        assert_eq!(result[0], ("PLAIN".into(), "hello".into()));
+        assert_eq!(result[1], ("SECRET".into(), "s3cret".into()));
+        assert_eq!(result[2], ("DEBUG".into(), "true".into()));
     }
 }

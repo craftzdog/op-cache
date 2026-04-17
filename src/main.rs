@@ -2,6 +2,7 @@ mod cli;
 mod client;
 mod config;
 mod daemon;
+mod env_file;
 mod error;
 mod protocol;
 mod run;
@@ -20,7 +21,11 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Read { reference, account } => cmd_read(config, &reference, account.as_deref()),
-        Command::Run { account, command } => cmd_run(config, command, account.as_deref()),
+        Command::Run {
+            account,
+            env_file,
+            command,
+        } => cmd_run(config, command, account.as_deref(), env_file.as_deref()),
         Command::Status => cmd_status(&config),
         Command::Stats => cmd_stats(config),
         Command::Clear => cmd_clear(config),
@@ -43,10 +48,21 @@ fn cmd_read(config: Config, reference: &str, account: Option<&str>) -> Result<()
     })
 }
 
-fn cmd_run(config: Config, command: Vec<String>, account: Option<&str>) -> Result<()> {
+fn cmd_run(
+    config: Config,
+    command: Vec<String>,
+    account: Option<&str>,
+    env_file: Option<&std::path::Path>,
+) -> Result<()> {
     let mut env: Vec<(String, String)> = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
         .collect();
+
+    if let Some(path) = env_file {
+        let file_env = env_file::parse_env_file(path)?;
+        env = run::merge_env(env, file_env);
+    }
+
     let refs = run::collect_op_refs(&env);
 
     if refs.is_empty() {

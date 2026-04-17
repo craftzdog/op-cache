@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -39,6 +41,10 @@ pub enum Command {
         /// 1Password account to use (e.g., my.1password.com)
         #[arg(long)]
         account: Option<String>,
+
+        /// Load environment variables from a file (.env format)
+        #[arg(long = "env-file")]
+        env_file: Option<PathBuf>,
 
         /// Command and arguments to execute
         #[arg(required = true, num_args = 1..)]

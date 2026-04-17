@@ -42,7 +42,7 @@ op-cache stop
 
 ### Running Commands with Secrets
 
-`op-cache run` scans your environment for variables with `op://` values, resolves them all concurrently through the cache, then replaces the current process with your command (via `exec`). If any resolution fails, the command is aborted.
+`op-cache run` resolves `op://` references concurrently through the cache, then replaces the current process with your command (via `exec`). If any resolution fails, the command is aborted.
 
 ```bash
 # Run a command with secrets in env vars
@@ -54,6 +54,28 @@ op-cache run -- ./my-app
 op-cache run -- env | grep SECRET
 op-cache run -- docker compose up
 ```
+
+### Using an Env File
+
+Use `--env-file` to load environment variables from a file, just like `op run --env-file`:
+
+```bash
+op-cache run --env-file=.env -- ./my-app
+```
+
+The env file uses standard `.env` format:
+
+```bash
+# .env
+DATABASE_URL="op://Private/DB/url"
+API_KEY="op://Private/API/token"
+DEBUG=true
+```
+
+- `KEY=VALUE`, `KEY="VALUE"`, and `KEY='VALUE'` are all supported
+- Lines starting with `#` are comments
+- Empty lines are ignored
+- Env file entries override variables from the current process environment
 
 ### Example
 
