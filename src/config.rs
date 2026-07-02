@@ -58,7 +58,7 @@ impl Config {
 
         if config_path.exists() {
             let contents = std::fs::read_to_string(&config_path)?;
-            let config: Config = serde_yaml::from_str(&contents)?;
+            let config: Config = serde_saphyr::from_str(&contents)?;
             Ok(config)
         } else {
             Ok(Config::default())
