@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 use anyhow::{bail, Result};
-use futures::stream::{self, StreamExt};
 
 use crate::client::Client;
-
-const MAX_CONCURRENT_READS: usize = 8;
 
 /// Returns unique op:// references found in env var values.
 pub fn collect_op_refs(env: &[(String, String)]) -> Vec<&str> {
@@ -24,45 +23,86 @@ pub fn collect_op_refs(env: &[(String, String)]) -> Vec<&str> {
         .collect()
 }
 
-/// Resolves all op:// references concurrently (bounded) through the cache.
+/// Resolves all op:// references through the cache.
+///
+/// Cached references are served locally; every cache miss is resolved together
+/// in a single `op inject` call so the 1Password authorization prompt appears at
+/// most once regardless of how many secrets a template contains.
+///
 /// Returns a map from reference string to resolved value.
 pub async fn resolve_refs(
     client: &Client,
     refs: &[&str],
     account: Option<&str>,
 ) -> Result<HashMap<String, String>> {
-    let results: Vec<_> = stream::iter(refs.iter().copied())
-        .map(|reference| async move {
-            let result = client.read(reference, account).await;
-            (reference, result)
-        })
-        .buffer_unordered(MAX_CONCURRENT_READS)
-        .collect()
-        .await;
-
     let mut resolved = HashMap::new();
-    let mut errors = Vec::new();
+    let mut missing = Vec::new();
 
-    for (reference, result) in results {
-        match result {
-            Ok(value) => {
+    // Probe the cache for every reference. Hits never invoke op, so they never prompt.
+    for &reference in refs {
+        match client.cache_get(reference, account).await? {
+            Some(value) => {
                 resolved.insert(reference.to_string(), value);
             }
-            Err(e) => {
-                errors.push(format!("{}: {}", reference, e));
-            }
+            None => missing.push(reference),
         }
     }
 
-    if !errors.is_empty() {
-        bail!(
-            "failed to resolve {} secret(s):\n  {}",
-            errors.len(),
-            errors.join("\n  ")
-        );
+    // Resolve all cache misses in one op call, then populate the cache per reference.
+    if !missing.is_empty() {
+        let delimiter = random_delimiter()?;
+        let template = build_inject_template(&missing, &delimiter);
+        let output = client.inject(&template, account).await?;
+        let fetched = parse_inject_output(&output, &delimiter, &missing)?;
+
+        for (reference, value) in fetched {
+            let _ = client.cache_set(&reference, account, value.clone()).await;
+            resolved.insert(reference, value);
+        }
     }
 
     Ok(resolved)
+}
+
+/// Build an `op inject` template that resolves every reference in one call.
+/// References are wrapped in `{{ ... }}` moustaches and joined by `delimiter`
+/// so the resolved values can be split apart unambiguously.
+fn build_inject_template(refs: &[&str], delimiter: &str) -> String {
+    refs.iter()
+        .map(|reference| format!("{{{{ {} }}}}", reference))
+        .collect::<Vec<_>>()
+        .join(delimiter)
+}
+
+/// Split `op inject` output back into per-reference values using `delimiter`.
+/// Values are matched to references positionally, mirroring the template order.
+fn parse_inject_output(
+    output: &str,
+    delimiter: &str,
+    refs: &[&str],
+) -> Result<HashMap<String, String>> {
+    let values: Vec<&str> = output.split(delimiter).collect();
+    if values.len() != refs.len() {
+        bail!(
+            "op inject returned {} value(s) for {} reference(s)",
+            values.len(),
+            refs.len()
+        );
+    }
+
+    Ok(refs
+        .iter()
+        .zip(values)
+        .map(|(reference, value)| (reference.to_string(), value.trim_end().to_string()))
+        .collect())
+}
+
+/// Generate a random 128-bit delimiter that will not collide with secret values.
+fn random_delimiter() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    Ok(format!("--op-cache-{}--", hex))
 }
 
 /// Build the final environment with resolved values substituted in.
@@ -296,6 +336,58 @@ mod tests {
         let merged = merge_env(process_env, file_env);
         let refs = collect_op_refs(&merged);
         assert_eq!(refs, vec!["op://vault/item/field"]);
+    }
+
+    // --- op inject template / parse tests ---
+
+    #[test]
+    fn build_inject_template_wraps_and_joins() {
+        let refs = vec!["op://vault/a", "op://vault/b"];
+        let template = build_inject_template(&refs, "|SEP|");
+        assert_eq!(template, "{{ op://vault/a }}|SEP|{{ op://vault/b }}");
+    }
+
+    #[test]
+    fn build_inject_template_single_ref_has_no_delimiter() {
+        let refs = vec!["op://vault/only"];
+        let template = build_inject_template(&refs, "|SEP|");
+        assert_eq!(template, "{{ op://vault/only }}");
+    }
+
+    #[test]
+    fn parse_inject_output_maps_values_positionally() {
+        let refs = vec!["op://vault/a", "op://vault/b"];
+        let output = "value-a|SEP|value-b";
+        let parsed = parse_inject_output(output, "|SEP|", &refs).unwrap();
+        assert_eq!(parsed.get("op://vault/a").map(String::as_str), Some("value-a"));
+        assert_eq!(parsed.get("op://vault/b").map(String::as_str), Some("value-b"));
+    }
+
+    #[test]
+    fn parse_inject_output_preserves_multiline_values() {
+        let refs = vec!["op://vault/key", "op://vault/token"];
+        let output = "-----BEGIN KEY-----\nline1\nline2\n-----END KEY-----|SEP|tok=en";
+        let parsed = parse_inject_output(output, "|SEP|", &refs).unwrap();
+        assert_eq!(
+            parsed.get("op://vault/key").map(String::as_str),
+            Some("-----BEGIN KEY-----\nline1\nline2\n-----END KEY-----")
+        );
+        assert_eq!(parsed.get("op://vault/token").map(String::as_str), Some("tok=en"));
+    }
+
+    #[test]
+    fn parse_inject_output_rejects_count_mismatch() {
+        let refs = vec!["op://vault/a", "op://vault/b"];
+        let output = "only-one-value";
+        assert!(parse_inject_output(output, "|SEP|", &refs).is_err());
+    }
+
+    #[test]
+    fn random_delimiter_is_unique_and_formatted() {
+        let a = random_delimiter().unwrap();
+        let b = random_delimiter().unwrap();
+        assert!(a.starts_with("--op-cache-") && a.ends_with("--"));
+        assert_ne!(a, b);
     }
 
     #[test]

@@ -1,5 +1,7 @@
+use std::process::Stdio;
 use std::time::Duration;
 
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::process::Command;
 
@@ -50,7 +52,23 @@ impl Client {
 
     /// Read a secret, using cache if available
     pub async fn read(&self, reference: &str, account: Option<&str>) -> Result<String, Error> {
-        // Validate reference format
+        if let Some(value) = self.cache_get(reference, account).await? {
+            return Ok(value);
+        }
+
+        let effective = Self::effective_account(account);
+        let value = self.execute_op_read(reference, effective.as_deref()).await?;
+        let _ = self.cache_set(reference, account, value.clone()).await;
+        Ok(value)
+    }
+
+    /// Look up a reference in the cache without invoking op.
+    /// Returns `None` on a cache miss; never triggers a 1Password prompt.
+    pub async fn cache_get(
+        &self,
+        reference: &str,
+        account: Option<&str>,
+    ) -> Result<Option<String>, Error> {
         if !reference.starts_with("op://") {
             return Err(Error::InvalidReference(format!(
                 "reference must start with 'op://': {}",
@@ -58,33 +76,29 @@ impl Client {
             )));
         }
 
-        // Ensure daemon is running
         ensure_daemon_running(&self.config)?;
 
         let effective = Self::effective_account(account);
         let key = Self::cache_key(reference, effective.as_deref());
 
-        // Check cache first
-        let response = self.send_request(Request::Get { key: key.clone() }).await?;
-
-        match response {
-            Response::Hit { value } => Ok(value),
-            Response::Miss => {
-                // Cache miss - execute op read ourselves
-                let value = self.execute_op_read(reference, effective.as_deref()).await?;
-
-                // Store in cache
-                let _ = self
-                    .send_request(Request::Set {
-                        key,
-                        value: value.clone(),
-                    })
-                    .await;
-
-                Ok(value)
-            }
+        match self.send_request(Request::Get { key }).await? {
+            Response::Hit { value } => Ok(Some(value)),
+            Response::Miss => Ok(None),
             _ => Err(Error::Protocol("unexpected response".to_string())),
         }
+    }
+
+    /// Store a resolved value in the cache. Best-effort; callers may ignore errors.
+    pub async fn cache_set(
+        &self,
+        reference: &str,
+        account: Option<&str>,
+        value: String,
+    ) -> Result<(), Error> {
+        let effective = Self::effective_account(account);
+        let key = Self::cache_key(reference, effective.as_deref());
+        self.send_request(Request::Set { key, value }).await?;
+        Ok(())
     }
 
     /// Execute op read command
@@ -114,6 +128,65 @@ impl Client {
                 .trim_end()
                 .to_string();
             Ok(value)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(Error::OpFailed(stderr.trim().to_string()))
+        }
+    }
+
+    /// Resolve a batch of secret references in a single `op inject` call.
+    ///
+    /// The template is fed via stdin and the raw resolved stdout is returned for
+    /// the caller to parse. Resolving every reference in one `op` invocation means
+    /// the 1Password authorization prompt appears at most once.
+    pub async fn inject(&self, template: &str, account: Option<&str>) -> Result<String, Error> {
+        let effective = Self::effective_account(account);
+        self.execute_op_inject(template, effective.as_deref()).await
+    }
+
+    /// Execute `op inject`, piping the template through stdin and returning stdout.
+    async fn execute_op_inject(
+        &self,
+        template: &str,
+        account: Option<&str>,
+    ) -> Result<String, Error> {
+        let timeout = Duration::from_secs(self.config.op_timeout_seconds);
+        let mut cmd = Command::new(&self.config.op_path);
+        cmd.arg("inject");
+        if let Some(acct) = account {
+            cmd.arg("--account").arg(acct);
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| Error::OpFailed(format!("failed to execute op: {}", e)))?;
+
+        // Feed the template while output drains concurrently, so a large resolved
+        // payload can never deadlock against an unflushed stdin.
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        let template_bytes = template.as_bytes().to_vec();
+        let writer = tokio::spawn(async move {
+            let _ = stdin.write_all(&template_bytes).await;
+            // stdin drops here, closing the pipe so op sees EOF
+        });
+
+        let output = tokio::time::timeout(timeout, child.wait_with_output())
+            .await
+            .map_err(|_| {
+                Error::OpFailed(format!(
+                    "op inject timed out after {}s",
+                    self.config.op_timeout_seconds
+                ))
+            })?
+            .map_err(|e| Error::OpFailed(format!("failed to execute op: {}", e)))?;
+
+        let _ = writer.await;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(Error::OpFailed(stderr.trim().to_string()))
