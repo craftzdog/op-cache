@@ -42,7 +42,9 @@ op-cache stop
 
 ### Running Commands with Secrets
 
-`op-cache run` resolves `op://` references concurrently through the cache, then replaces the current process with your command (via `exec`). If any resolution fails, the command is aborted.
+`op-cache run` resolves `op://` references through the cache, then replaces the current process with your command (via `exec`). If any resolution fails, the command is aborted.
+
+Each reference is first looked up in the cache. Any cache misses are resolved together in a single `op inject` call, so 1Password prompts for authorization at most once per run - even if the env has many uncached secrets.
 
 ```bash
 # Run a command with secrets in env vars
@@ -54,6 +56,17 @@ op-cache run -- ./my-app
 op-cache run -- env | grep SECRET
 op-cache run -- docker compose up
 ```
+
+### Multiple 1Password Accounts
+
+Use `--account` to target a specific account, on either `read` or `run`:
+
+```bash
+op-cache read --account my.1password.com op://Private/API/token
+op-cache run --account my.1password.com -- ./my-app
+```
+
+If `--account` is omitted, the `OP_ACCOUNT` environment variable is used when set. Cache entries are partitioned per account, so the same reference on different accounts never returns the wrong secret.
 
 ### Using an Env File
 
@@ -122,6 +135,8 @@ Cache Statistics:
 4. Daemon is auto-started on first use
 
 The client (not the daemon) executes `op read`. This ensures proper access to your desktop session and 1Password app integration.
+
+`op-cache run` follows the same cache-first flow, but batches cache misses: instead of one `op read` per missing reference, it resolves all of them in a single `op inject` call, then stores each result in the cache individually. This avoids triggering a separate 1Password authorization prompt per secret.
 
 ## Configuration
 
