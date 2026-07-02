@@ -15,10 +15,10 @@ serde_yaml = "0.9"
 moka = { version = "0.12", features = ["future"] }
 thiserror = "2"
 anyhow = "1"
-fork = "0.2"
+fork = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-directories = "5"
+directories = "6"
 libc = "0.2"
 blake3 = "1"
 
