@@ -152,6 +152,16 @@ op_timeout_seconds: 30  # Timeout for op commands
 
 All settings are optional - sensible defaults are used.
 
+## Windows
+
+`op-cache` runs natively on Windows with the Windows 1Password CLI (`op.exe`) on your `PATH`. These details differ from Unix:
+
+- Config file: `%APPDATA%\op-cache\config\config.yaml`
+- `socket_path` is a named pipe, by default `\\.\pipe\op-cache-<username>`. A custom value must also be a `\\.\pipe\...` path.
+- The PID and log files are in `%TEMP%`.
+- `op-cache run` waits for the command and exits with its status, because Windows has no `exec`.
+- `op-cache run` needs the full name of batch-file commands, such as `op-cache run -- npm.cmd test`.
+
 ## Performance
 
 | Operation | Latency |
