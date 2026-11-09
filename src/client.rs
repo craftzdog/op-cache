@@ -2,11 +2,11 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
 use tokio::process::Command;
 
 use crate::config::Config;
 use crate::error::Error;
+use crate::ipc;
 use crate::protocol::{read_message, write_message, CacheStats, Request, Response};
 use crate::spawn::ensure_daemon_running;
 
@@ -19,8 +19,8 @@ impl Client {
         Self { config }
     }
 
-    async fn connect(&self) -> Result<UnixStream, Error> {
-        UnixStream::connect(&self.config.socket_path)
+    async fn connect(&self) -> Result<ipc::ClientStream, Error> {
+        ipc::connect(&self.config.socket_path)
             .await
             .map_err(Error::ConnectionFailed)
     }

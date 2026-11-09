@@ -4,6 +4,7 @@ pub mod server;
 use std::fs::File;
 use std::io::Write;
 
+#[cfg(unix)]
 use fork::{daemon, Fork};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -17,6 +18,7 @@ use self::server::Server;
 /// Uses traditional double-fork daemonization which is safe because
 /// the daemon is just a cache server - it doesn't need D-Bus or any
 /// session resources.
+#[cfg(unix)]
 pub fn daemonize(config: Config) -> Result<(), Error> {
     match daemon(false, false) {
         Ok(Fork::Parent(_)) => {
@@ -29,6 +31,13 @@ pub fn daemonize(config: Config) -> Result<(), Error> {
         }
         Err(e) => Err(Error::SpawnFailed(format!("fork failed: {}", e))),
     }
+}
+
+/// Run the server in this process. Windows cannot fork, so the spawning client
+/// starts this process already detached.
+#[cfg(windows)]
+pub fn daemonize(config: Config) -> Result<(), Error> {
+    run_daemon(config)
 }
 
 /// Run the daemon in the foreground (for testing/debugging)
@@ -81,7 +90,14 @@ fn run_daemon_inner(config: Config) -> Result<(), Error> {
     })
 }
 
+/// Check if daemon is running by probing its named pipe
+#[cfg(windows)]
+pub fn is_running(config: &Config) -> bool {
+    crate::ipc::is_ready(&config.socket_path)
+}
+
 /// Check if daemon is running by checking PID file and process
+#[cfg(unix)]
 pub fn is_running(config: &Config) -> bool {
     let pid_path = config.pid_path();
 

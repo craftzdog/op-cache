@@ -1,14 +1,16 @@
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
-use tokio::net::{UnixListener, UnixStream};
+use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use crate::config::Config;
 use crate::error::Error;
+use crate::ipc;
 use crate::protocol::{read_message, write_message, Request, Response};
 
 use super::cache::Cache;
+
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 pub struct Server {
     config: Config,
@@ -23,25 +25,7 @@ impl Server {
     }
 
     pub async fn run(&self) -> Result<(), Error> {
-        // Remove existing socket if present
-        let _ = std::fs::remove_file(&self.config.socket_path);
-
-        // Set restrictive umask before binding to avoid permission race window
-        let old_umask = unsafe { libc::umask(0o177) };
-        let bind_result = UnixListener::bind(&self.config.socket_path);
-        unsafe { libc::umask(old_umask) }; // Restore umask
-
-        let listener = bind_result
-            .map_err(|e| Error::Internal(format!("failed to bind socket: {}", e)))?;
-
-        // Verify permissions (belt and suspenders)
-        if let Err(e) = std::fs::set_permissions(
-            &self.config.socket_path,
-            std::fs::Permissions::from_mode(0o600),
-        ) {
-            let _ = std::fs::remove_file(&self.config.socket_path);
-            return Err(Error::Internal(format!("failed to set socket permissions: {}", e)));
-        }
+        let mut listener = ipc::Listener::bind(&self.config.socket_path)?;
 
         info!("daemon listening on {:?}", self.config.socket_path);
 
@@ -53,7 +37,7 @@ impl Server {
             tokio::select! {
                 result = listener.accept() => {
                     match result {
-                        Ok((stream, _addr)) => {
+                        Ok(stream) => {
                             let cache = Arc::clone(&self.cache);
                             let mut conn_shutdown_rx = shutdown_rx.clone();
                             let conn_shutdown_tx = Arc::clone(&shutdown_tx);
@@ -71,6 +55,7 @@ impl Server {
                         }
                         Err(e) => {
                             error!("accept error: {}", e);
+                            tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
                         }
                     }
                 }
@@ -89,7 +74,7 @@ impl Server {
         }
 
         // Cleanup socket
-        let _ = std::fs::remove_file(&self.config.socket_path);
+        ipc::remove_endpoint(&self.config.socket_path);
         let _ = std::fs::remove_file(self.config.pid_path());
 
         Ok(())
@@ -97,7 +82,7 @@ impl Server {
 }
 
 async fn handle_connection(
-    mut stream: UnixStream,
+    mut stream: ipc::ServerStream,
     cache: Arc<Cache>,
     shutdown_rx: &mut watch::Receiver<bool>,
     shutdown_tx: Arc<watch::Sender<bool>>,

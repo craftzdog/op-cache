@@ -4,6 +4,7 @@ mod config;
 mod daemon;
 mod env_file;
 mod error;
+mod ipc;
 mod protocol;
 mod run;
 mod spawn;

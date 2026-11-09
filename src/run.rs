@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 
 use crate::client::Client;
 
@@ -100,7 +99,7 @@ fn parse_inject_output(
 /// Generate a random 128-bit delimiter that will not collide with secret values.
 fn random_delimiter() -> Result<String> {
     let mut bytes = [0u8; 16];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    getrandom::fill(&mut bytes).map_err(|e| anyhow!("failed to generate delimiter: {}", e))?;
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     Ok(format!("--op-cache-{}--", hex))
 }
@@ -156,18 +155,44 @@ pub fn merge_env(
     result
 }
 
-/// Replace the current process with the given command and environment.
-/// This function does not return on success.
-pub fn exec_command(program: &str, args: &[String], env: &[(String, String)]) -> Result<()> {
+fn build_command(program: &str, args: &[String], env: &[(String, String)]) -> Command {
     let mut cmd = Command::new(program);
     cmd.args(args);
     cmd.env_clear();
     for (k, v) in env {
         cmd.env(k, v);
     }
+    cmd
+}
+
+/// Replace the current process with the given command and environment.
+/// This function does not return on success.
+#[cfg(unix)]
+pub fn exec_command(program: &str, args: &[String], env: &[(String, String)]) -> Result<()> {
     // exec replaces the process; if it returns, something went wrong
-    let err = cmd.exec();
+    let err = build_command(program, args, env).exec();
     bail!("exec failed: {}", err)
+}
+
+/// Run the given command to completion, then exit with its status.
+/// This function does not return on success.
+#[cfg(windows)]
+pub fn exec_command(program: &str, args: &[String], env: &[(String, String)]) -> Result<()> {
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+    unsafe extern "system" fn leave_ctrl_events_to_child(_event: u32) -> BOOL {
+        1
+    }
+
+    // Windows has no exec, so this process stays alive as the child's parent. It
+    // must outlive a Ctrl+C or the shell would return while the child shuts down.
+    unsafe { SetConsoleCtrlHandler(Some(leave_ctrl_events_to_child), 1) };
+
+    let status = build_command(program, args, env)
+        .status()
+        .map_err(|e| anyhow!("failed to run {}: {}", program, e))?;
+    std::process::exit(status.code().unwrap_or(1))
 }
 
 #[cfg(test)]

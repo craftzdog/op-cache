@@ -20,8 +20,16 @@ pub struct Config {
     pub op_timeout_seconds: u64,
 }
 
+#[cfg(unix)]
 fn default_socket_path() -> PathBuf {
     PathBuf::from("/tmp/op-cache.sock")
+}
+
+/// Pipe names are machine-global, so each user needs their own.
+#[cfg(windows)]
+fn default_socket_path() -> PathBuf {
+    let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
+    PathBuf::from(format!(r"\\.\pipe\op-cache-{}", username))
 }
 
 fn default_ttl_seconds() -> u64 {
@@ -74,10 +82,49 @@ impl Config {
     }
 
     pub fn pid_path(&self) -> PathBuf {
-        self.socket_path.with_extension("pid")
+        self.daemon_file_path("pid")
     }
 
     pub fn log_path(&self) -> PathBuf {
-        self.socket_path.with_extension("log")
+        self.daemon_file_path("log")
+    }
+
+    #[cfg(unix)]
+    fn daemon_file_path(&self, extension: &str) -> PathBuf {
+        self.socket_path.with_extension(extension)
+    }
+
+    /// A named pipe path is not on the filesystem, so these files go in the
+    /// per-user temp directory instead of next to it.
+    #[cfg(windows)]
+    fn daemon_file_path(&self, extension: &str) -> PathBuf {
+        let pipe_name = self
+            .socket_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("op-cache"))
+            .to_string_lossy();
+        std::env::temp_dir().join(format!("{}.{}", pipe_name, extension))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_files_live_in_temp_dir_not_pipe_namespace() {
+        let config = Config {
+            socket_path: PathBuf::from(r"\\.\pipe\op-cache-tester"),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            config.pid_path(),
+            std::env::temp_dir().join("op-cache-tester.pid")
+        );
+        assert_eq!(
+            config.log_path(),
+            std::env::temp_dir().join("op-cache-tester.log")
+        );
     }
 }
